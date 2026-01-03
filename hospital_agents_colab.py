@@ -79,7 +79,6 @@ def read_file(file):
     if file is None:
         return None
     try:
-        # Handle Gradio file object
         if hasattr(file, 'name'):
             fp = file.name
         else:
@@ -90,7 +89,6 @@ def read_file(file):
         elif fp.endswith(('.xlsx', '.xls')):
             return pd.read_excel(fp)
         else:
-            # Try CSV first
             return pd.read_csv(fp)
     except Exception as e:
         print(f"Error reading file: {e}")
@@ -220,51 +218,63 @@ STAFFING RECOMMENDATIONS
 
 # =============================================================================
 # AGENT 3: ICU AGENT
+# Updated for columns: date, icu_beds_total, icu_beds_occupied, icu_admissions, avg_icu_stay, primary_reason
 # =============================================================================
 
-ICU_SAMPLE = """ward,occupied_beds,available_beds,total_beds
-General ICU,8,2,10
-Cardiac ICU,5,1,6
-Neuro ICU,4,2,6
-Pediatric ICU,3,2,5
-Surgical ICU,6,2,8
-Trauma ICU,4,1,5"""
+ICU_SAMPLE = """date,icu_beds_total,icu_beds_occupied,icu_admissions,avg_icu_stay,primary_reason
+2024-01-01,32,15,3,6.5,sepsis
+2024-01-02,32,25,10,6.2,stroke
+2024-01-03,35,27,14,4.1,sepsis
+2024-01-04,32,20,6,4.6,respiratory_failure
+2024-01-05,35,34,13,4.6,stroke
+2024-01-06,35,32,16,5.1,sepsis
+2024-01-07,40,23,16,5.1,sepsis"""
 
 def icu_agent(icu_file, emergency_forecast: str, conversion_rate: float):
     """ICU capacity prediction agent"""
     if icu_file is None:
-        return "⚠️ Please upload an ICU bed status CSV/Excel file."
+        return "⚠️ Please upload an ICU data CSV/Excel file."
     
     df = read_file(icu_file)
-    if df is None:
+    if df is None or df.empty:
         return "❌ Error reading file. Please check the format."
     
     try:
-        # Calculate totals with safe defaults
-        total_occupied = int(df['occupied_beds'].sum()) if 'occupied_beds' in df.columns else 0
-        total_available = int(df['available_beds'].sum()) if 'available_beds' in df.columns else 0
-        total_beds = int(df['total_beds'].sum()) if 'total_beds' in df.columns else (total_occupied + total_available)
+        # Get the latest record for current status
+        latest = df.iloc[-1] if len(df) > 0 else None
         
-        if total_beds == 0:
-            total_beds = 1  # Avoid division by zero
+        # Calculate totals - using your actual column names
+        total_beds = int(pd.to_numeric(df['icu_beds_total'], errors='coerce').mean()) if 'icu_beds_total' in df.columns else 0
+        avg_occupied = pd.to_numeric(df['icu_beds_occupied'], errors='coerce').mean() if 'icu_beds_occupied' in df.columns else 0
+        total_admissions = int(pd.to_numeric(df['icu_admissions'], errors='coerce').sum()) if 'icu_admissions' in df.columns else 0
+        avg_stay = pd.to_numeric(df['avg_icu_stay'], errors='coerce').mean() if 'avg_icu_stay' in df.columns else 0
         
-        occupancy_rate = (total_occupied / total_beds * 100)
+        # Calculate available beds
+        current_occupied = int(pd.to_numeric(df['icu_beds_occupied'], errors='coerce').iloc[-1]) if 'icu_beds_occupied' in df.columns else 0
+        current_total = int(pd.to_numeric(df['icu_beds_total'], errors='coerce').iloc[-1]) if 'icu_beds_total' in df.columns else 0
+        available_beds = current_total - current_occupied
         
-        # Get ward details safely
-        ward_list = []
-        for _, row in df.head(10).iterrows():
-            ward_info = {k: str(v) for k, v in row.to_dict().items()}
-            ward_list.append(ward_info)
+        occupancy_rate = (current_occupied / current_total * 100) if current_total > 0 else 0
+        
+        # Get primary reasons distribution
+        reason_counts = df['primary_reason'].value_counts().head(5).to_dict() if 'primary_reason' in df.columns else {}
+        
+        # Get recent trends
+        recent_data = df.tail(7).to_dict('records')
         
     except Exception as e:
-        return f"❌ Error processing data: {str(e)}"
+        return f"❌ Error processing data: {str(e)}\n\nColumns found: {list(df.columns)}"
     
     prompt = f"""Analyze ICU capacity and predict requirements:
 
 CURRENT ICU STATUS:
-Total Beds: {total_beds} | Occupied: {total_occupied} | Available: {total_available}
+Total Beds: {current_total} | Currently Occupied: {current_occupied} | Available: {available_beds}
 Occupancy Rate: {occupancy_rate:.1f}%
-Ward Details: {ward_list}
+Total Admissions (period): {total_admissions}
+Average ICU Stay: {avg_stay:.1f} days
+
+TOP REASONS FOR ICU ADMISSION:
+{reason_counts}
 
 Emergency to ICU Conversion Rate: {conversion_rate*100:.0f}%
 {f"Emergency Forecast: {emergency_forecast}" if emergency_forecast else "No emergency forecast provided"}
@@ -275,20 +285,19 @@ EXPECTED ICU ADMISSIONS
 -----------------------
 Next 24 Hours: [number range]
 Next 7 Days: [range]
-Primary Causes: [top 3 conditions]
+Primary Causes: [top 3 conditions from the data]
 
 ICU BED SHORTAGE RISK
 ---------------------
 Overall Risk Level: HIGH / MODERATE / LOW
-Critical Wards: [list wards with low availability]
-Time to Full Capacity: [estimate]
+Time to Full Capacity: [estimate based on trends]
 Overflow Risk: [percentage]
 
 MAJOR ICU-CAUSING CONDITIONS
 ----------------------------
-1. [condition] - Expected cases: [number], Avg stay: [days]
-2. [condition] - Expected cases: [number], Avg stay: [days]
-3. [condition] - Expected cases: [number], Avg stay: [days]
+1. [condition from data] - Expected cases: [number], Avg stay: [days]
+2. [condition from data] - Expected cases: [number], Avg stay: [days]
+3. [condition from data] - Expected cases: [number], Avg stay: [days]
 
 RECOMMENDATIONS
 ---------------
@@ -306,10 +315,13 @@ RECOMMENDATIONS
 
 CURRENT STATUS
 --------------
-🛏️ Total ICU Beds: {total_beds}
-🔴 Occupied: {total_occupied} ({occupancy_rate:.1f}%)
-🟢 Available: {total_available}
-📊 Conversion Rate: {conversion_rate*100:.0f}%
+🛏️ Total ICU Beds: {current_total}
+🔴 Occupied: {current_occupied} ({occupancy_rate:.1f}%)
+🟢 Available: {available_beds}
+📊 Avg Stay: {avg_stay:.1f} days
+🔄 Conversion Rate: {conversion_rate*100:.0f}%
+
+TOP ICU REASONS: {reason_counts}
 
 {result}
 """
@@ -317,130 +329,232 @@ CURRENT STATUS
 
 # =============================================================================
 # AGENT 4: STAFF MANAGING AGENT
+# Updated for columns: floor, shift, nurses_total, nurses_available, wardboys_total, wardboys_available, overtime_hours, burnout_flag
 # =============================================================================
 
-STAFF_SAMPLE = """floor,shift,nurses_available,nurses_required,wardboys_available,wardboys_required,doctors_available,doctors_required
-Ground,Morning,5,6,3,4,2,2
-Ground,Evening,4,5,2,3,2,2
-Ground,Night,3,4,2,3,1,2
-First,Morning,6,6,4,4,3,3
-First,Evening,5,6,3,4,2,3
-First,Night,3,5,2,3,1,2
-ICU,Morning,8,10,4,5,4,4
-ICU,Evening,7,10,3,5,3,4
-ICU,Night,5,8,3,4,2,3
-Emergency,Morning,6,8,4,5,3,4
-Emergency,Evening,8,10,5,6,4,5
-Emergency,Night,5,8,4,5,3,4"""
+STAFF_SAMPLE = """floor,shift,nurses_total,nurses_available,wardboys_total,wardboys_available,overtime_hours,burnout_flag
+Floor-1,day,14,12,13,11,3.6,low
+Floor-1,night,11,8,11,5,7.6,high
+Floor-2,day,19,12,10,3,6.8,low
+Floor-2,night,17,10,9,9,2.8,low
+Floor-3,day,14,12,13,11,3.6,low
+Floor-3,night,19,18,11,5,3,medium
+ICU,day,20,13,6,4,3.2,low
+ICU,night,19,16,13,3,5.9,medium
+Emergency,day,18,18,11,8,6.6,low
+Emergency,night,15,8,9,7,3.6,high"""
 
-def staff_agent(staff_file, severity: str, icu_forecast: str, emergency_forecast: str, staff_ratio: str):
-    """Staff management agent"""
+def staff_agent(staff_file, severity, staff_ratio):
+    """Staff management agent - Data-driven with minimal LLM dependency"""
     if staff_file is None:
         return "⚠️ Please upload a staff schedule CSV/Excel file."
     
+    severity = severity if severity else "moderate"
+    staff_ratio = staff_ratio if staff_ratio else "1:4"
+    
     df = read_file(staff_file)
-    if df is None:
-        return "❌ Error reading file. Please check the format."
+    if df is None or df.empty:
+        return "❌ Error: Could not read file or file is empty."
     
     try:
-        # Calculate staff gaps safely
-        nurse_gap = 0
-        wardboy_gap = 0
-        doctor_gap = 0
+        # ============= CALCULATE ALL METRICS FROM DATA =============
         
-        if 'nurses_required' in df.columns and 'nurses_available' in df.columns:
-            diff = df['nurses_required'].astype(float) - df['nurses_available'].astype(float)
-            nurse_gap = int(diff.clip(lower=0).sum())
+        # 1. Calculate nurse gaps per shift
+        nurse_gaps_by_shift = {}
+        wardboy_gaps_by_shift = {}
+        total_nurse_gap = 0
+        total_wardboy_gap = 0
         
-        if 'wardboys_required' in df.columns and 'wardboys_available' in df.columns:
-            diff = df['wardboys_required'].astype(float) - df['wardboys_available'].astype(float)
-            wardboy_gap = int(diff.clip(lower=0).sum())
+        if 'shift' in df.columns:
+            for shift in df['shift'].unique():
+                shift_df = df[df['shift'] == shift]
+                
+                if 'nurses_total' in df.columns and 'nurses_available' in df.columns:
+                    total_n = pd.to_numeric(shift_df['nurses_total'], errors='coerce').fillna(0).sum()
+                    avail_n = pd.to_numeric(shift_df['nurses_available'], errors='coerce').fillna(0).sum()
+                    gap = int(max(0, total_n - avail_n))
+                    nurse_gaps_by_shift[shift] = gap
+                    total_nurse_gap += gap
+                
+                if 'wardboys_total' in df.columns and 'wardboys_available' in df.columns:
+                    total_w = pd.to_numeric(shift_df['wardboys_total'], errors='coerce').fillna(0).sum()
+                    avail_w = pd.to_numeric(shift_df['wardboys_available'], errors='coerce').fillna(0).sum()
+                    gap = int(max(0, total_w - avail_w))
+                    wardboy_gaps_by_shift[shift] = gap
+                    total_wardboy_gap += gap
         
-        if 'doctors_required' in df.columns and 'doctors_available' in df.columns:
-            diff = df['doctors_required'].astype(float) - df['doctors_available'].astype(float)
-            doctor_gap = int(diff.clip(lower=0).sum())
+        # 2. Find floors with highest nurse shortage
+        floor_nurse_gaps = []
+        if 'floor' in df.columns and 'nurses_total' in df.columns and 'nurses_available' in df.columns:
+            for floor in df['floor'].unique():
+                floor_df = df[df['floor'] == floor]
+                total_n = pd.to_numeric(floor_df['nurses_total'], errors='coerce').fillna(0).sum()
+                avail_n = pd.to_numeric(floor_df['nurses_available'], errors='coerce').fillna(0).sum()
+                gap = int(max(0, total_n - avail_n))
+                if gap > 0:
+                    floor_nurse_gaps.append((floor, gap))
+        floor_nurse_gaps.sort(key=lambda x: x[1], reverse=True)
+        priority_floors = [f"{f[0]} (need {f[1]})" for f in floor_nurse_gaps[:5]]
         
-        # Get floor data safely
-        floor_data = []
-        for _, row in df.head(12).iterrows():
-            row_dict = {}
-            for k, v in row.to_dict().items():
-                row_dict[k] = str(v) if pd.notna(v) else "N/A"
-            floor_data.append(row_dict)
+        # 3. Find highest stress shift (by overtime)
+        stress_analysis = []
+        if 'floor' in df.columns and 'shift' in df.columns and 'overtime_hours' in df.columns:
+            for _, row in df.iterrows():
+                floor = row.get('floor', 'Unknown')
+                shift = row.get('shift', 'Unknown')
+                overtime = pd.to_numeric(row.get('overtime_hours', 0), errors='coerce')
+                burnout = row.get('burnout_flag', 'low')
+                if pd.notna(overtime):
+                    stress_analysis.append({
+                        'floor': floor,
+                        'shift': shift,
+                        'overtime': float(overtime),
+                        'burnout': burnout
+                    })
+        
+        stress_analysis.sort(key=lambda x: x['overtime'], reverse=True)
+        highest_stress = stress_analysis[0] if stress_analysis else {'floor': 'N/A', 'shift': 'N/A', 'overtime': 0, 'burnout': 'N/A'}
+        
+        # 4. Burnout risk areas
+        high_burnout = []
+        medium_burnout = []
+        if 'burnout_flag' in df.columns:
+            for _, row in df.iterrows():
+                flag = str(row.get('burnout_flag', '')).lower()
+                area = f"{row.get('floor', 'Unknown')} - {row.get('shift', 'Unknown')}"
+                overtime = pd.to_numeric(row.get('overtime_hours', 0), errors='coerce')
+                if flag == 'high':
+                    high_burnout.append(f"{area} (OT: {overtime:.1f}h)")
+                elif flag == 'medium':
+                    medium_burnout.append(f"{area} (OT: {overtime:.1f}h)")
+        
+        # 5. Overall statistics
+        avg_overtime = pd.to_numeric(df['overtime_hours'], errors='coerce').mean() if 'overtime_hours' in df.columns else 0
+        max_overtime = pd.to_numeric(df['overtime_hours'], errors='coerce').max() if 'overtime_hours' in df.columns else 0
+        burnout_counts = df['burnout_flag'].value_counts().to_dict() if 'burnout_flag' in df.columns else {}
+        
+        # 6. Determine risk level
+        if len(high_burnout) >= 3 or avg_overtime > 6:
+            overall_risk = "🔴 HIGH"
+        elif len(high_burnout) >= 1 or avg_overtime > 4:
+            overall_risk = "🟡 MODERATE"
+        else:
+            overall_risk = "🟢 LOW"
         
     except Exception as e:
-        return f"❌ Error processing data: {str(e)}"
+        return f"❌ Error processing data: {str(e)}\n\nColumns found: {list(df.columns)}"
     
-    prompt = f"""Analyze hospital staffing and provide recommendations:
-
-STAFF DATA:
-{floor_data}
-
-CURRENT GAPS:
-Nurses Needed: {nurse_gap} | Wardboys Needed: {wardboy_gap} | Doctors Needed: {doctor_gap}
-
-CONTEXT:
-Patient Severity: {severity}
-Staff Ratio Target: {staff_ratio}
-{f"ICU Forecast: {icu_forecast}" if icu_forecast else "No ICU forecast"}
-{f"Emergency Forecast: {emergency_forecast}" if emergency_forecast else "No emergency forecast"}
-
-Provide analysis in this format:
-
-ADDITIONAL NURSES REQUIRED
---------------------------
-Immediate Need: [number]
-By Shift:
-  Morning: [+/- number]
-  Evening: [+/- number]
-  Night: [+/- number]
-Priority Floors: [list floors needing nurses most]
-
-ADDITIONAL WARD STAFF REQUIRED
-------------------------------
-Wardboys Needed: [number]
-Critical Areas: [list areas]
-Recommended Deployment: [brief plan]
-
-SHIFT WITH HIGHEST STRESS
--------------------------
-Most Stressed: [shift name + floor]
-Reason: [brief explanation]
-Current Load: [description]
-Recommended Action: [action]
-
-BURNOUT & ERROR RISK AREAS
---------------------------
-| Area/Floor | Risk Level | Contributing Factors |
-| [area] | HIGH | [factors] |
-| [area] | MODERATE | [factors] |
-| [area] | LOW | [factors] |
-
-RECOMMENDATIONS
----------------
-1. [immediate action]
-2. [short-term improvement]
-3. [scheduling optimization]
-4. [workload balancing tip]"""
-
-    result = call_llm(prompt)
+    # ============= BUILD OUTPUT (DATA-DRIVEN) =============
     
     output = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║         STAFF AGENT - WORKFORCE MANAGEMENT                   ║
 ╚══════════════════════════════════════════════════════════════╝
 📅 {datetime.now().strftime('%B %d, %Y %I:%M %p')}
+📊 Records Analyzed: {len(df)} | Severity: {severity.upper()} | Ratio: {staff_ratio}
 
-CURRENT GAPS SUMMARY
---------------------
-👩‍⚕️ Nurses Needed: {nurse_gap}
-🧑‍🔧 Wardboys Needed: {wardboy_gap}
-👨‍⚕️ Doctors Needed: {doctor_gap}
-⚠️ Severity Level: {severity.upper()}
-📊 Target Ratio: {staff_ratio}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 ADDITIONAL NURSES REQUIRED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Total Immediate Need: {total_nurse_gap} nurses
 
-{result}
+  By Shift:
 """
+    for shift, gap in nurse_gaps_by_shift.items():
+        output += f"    • {shift.capitalize()}: +{gap} nurses needed\n"
+    
+    output += f"""
+  Priority Floors:
+"""
+    if priority_floors:
+        for pf in priority_floors:
+            output += f"    • {pf}\n"
+    else:
+        output += "    • All floors adequately staffed\n"
+    
+    output += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧑‍🔧 ADDITIONAL WARD STAFF REQUIRED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Total Wardboys Needed: {total_wardboy_gap}
+
+  By Shift:
+"""
+    for shift, gap in wardboy_gaps_by_shift.items():
+        output += f"    • {shift.capitalize()}: +{gap} wardboys needed\n"
+    
+    output += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ SHIFT WITH HIGHEST STRESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🔴 Most Stressed: {highest_stress['floor']} - {highest_stress['shift']}
+  ⏰ Overtime: {highest_stress['overtime']:.1f} hours
+  📊 Burnout Flag: {highest_stress['burnout']}
+  
+  Average Overtime (All): {avg_overtime:.1f} hours
+  Maximum Overtime: {max_overtime:.1f} hours
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 BURNOUT & ERROR RISK AREAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Overall Risk Level: {overall_risk}
+  
+  Burnout Distribution: {burnout_counts}
+
+  🔴 HIGH RISK Areas:
+"""
+    if high_burnout:
+        for area in high_burnout:
+            output += f"    • {area}\n"
+    else:
+        output += "    • None identified\n"
+    
+    output += """
+  🟡 MODERATE RISK Areas:
+"""
+    if medium_burnout:
+        for area in medium_burnout[:5]:
+            output += f"    • {area}\n"
+    else:
+        output += "    • None identified\n"
+    
+    # ============= RECOMMENDATIONS (DETERMINISTIC LOGIC) =============
+    # No LLM calls to prevent hallucination
+    
+    recs = []
+    
+    # 1. Nurse Shortage Recommendations
+    if total_nurse_gap > 10:
+        recs.append("🚨 CRITICAL: Hire agency nurses immediately for next 48h")
+        recs.append("⚠️ Offer double overtime pay for extra shifts")
+    elif total_nurse_gap > 3:
+        recs.append("⚡ Request float pool nurses for high-gap shifts")
+    
+    # 2. Wardboy Recommendations
+    if total_wardboy_gap > 5:
+        recs.append("⚠️ Redeploy non-clinical staff to support transport tasks")
+    
+    # 3. Reduce Stress/Burnout
+    if len(high_burnout) > 0:
+        recs.append(f"🛑 Mandatory rest for {len(high_burnout)} high-burnout teams")
+    
+    if avg_overtime > 4:
+        recs.append("📉 Cap overtime hours; rotate staff from lower-acuity units")
+    else:
+        recs.append("✅ Optimize schedule: Shift start times by +1 hour")
+        
+    # Ensure always 4 recommendations
+    while len(recs) < 4:
+        recs.append("🔄 Review acuity-based staffing ratios daily")
+        
+    output += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 RECOMMENDATIONS (Automated Limit-Based)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    for rec in recs[:4]:
+        output += f"  • {rec}\n"
+    
     return output
 
 # =============================================================================
@@ -473,7 +587,7 @@ with gr.Blocks(title="Hospital AI Agents", theme=gr.themes.Soft()) as demo:
                     em_file = gr.File(label="📁 Patient Data", file_types=[".csv", ".xlsx"])
                     em_ctx = gr.Textbox(label="💬 Context", lines=2)
                     em_btn = gr.Button("📈 Predict", variant="primary")
-                    gr.Textbox(value=EMERGENCY_SAMPLE, label="Sample Data (copy to CSV)", lines=6, interactive=False)
+                    gr.Textbox(value=EMERGENCY_SAMPLE, label="Sample Data", lines=6, interactive=False)
                 with gr.Column(scale=2):
                     em_out = gr.Textbox(label="Prediction", lines=20)
             em_btn.click(fn=emergency_agent, inputs=[em_file, em_ctx], outputs=[em_out])
@@ -481,17 +595,17 @@ with gr.Blocks(title="Hospital AI Agents", theme=gr.themes.Soft()) as demo:
         # TAB 3: ICU AGENT
         with gr.TabItem("🏥 ICU"):
             gr.Markdown("### ICU Capacity Prediction")
+            gr.Markdown("**Expected columns:** `date`, `icu_beds_total`, `icu_beds_occupied`, `icu_admissions`, `avg_icu_stay`, `primary_reason`")
             with gr.Row():
                 with gr.Column(scale=1):
-                    icu_file = gr.File(label="📁 ICU Bed Status", file_types=[".csv", ".xlsx"])
+                    icu_file = gr.File(label="📁 ICU Data", file_types=[".csv", ".xlsx"])
                     icu_forecast = gr.Textbox(label="📊 Emergency Forecast", placeholder="e.g., 50-60 patients expected", lines=2)
                     icu_rate = gr.Slider(label="🔄 Conversion Rate (%)", minimum=10, maximum=50, value=25, step=5)
                     icu_btn = gr.Button("🔮 Predict ICU Load", variant="primary")
-                    gr.Textbox(value=ICU_SAMPLE, label="Sample Data (copy to CSV)", lines=6, interactive=False)
+                    gr.Textbox(value=ICU_SAMPLE, label="Sample Data", lines=6, interactive=False)
                 with gr.Column(scale=2):
                     icu_out = gr.Textbox(label="ICU Prediction", lines=22)
             
-            # Convert slider value from percentage to decimal
             icu_btn.click(
                 fn=lambda f, fc, r: icu_agent(f, fc, r/100), 
                 inputs=[icu_file, icu_forecast, icu_rate], 
@@ -501,23 +615,18 @@ with gr.Blocks(title="Hospital AI Agents", theme=gr.themes.Soft()) as demo:
         # TAB 4: STAFF AGENT
         with gr.TabItem("👥 Staff"):
             gr.Markdown("### Staff Management")
+            gr.Markdown("**Expected columns:** `floor`, `shift`, `nurses_total`, `nurses_available`, `wardboys_total`, `wardboys_available`, `overtime_hours`, `burnout_flag`")
             with gr.Row():
                 with gr.Column(scale=1):
                     staff_file = gr.File(label="📁 Staff Schedule", file_types=[".csv", ".xlsx"])
                     severity = gr.Dropdown(label="⚠️ Patient Severity", choices=["low", "moderate", "high", "critical"], value="moderate")
-                    staff_icu = gr.Textbox(label="🏥 ICU Forecast", placeholder="e.g., 5-10 ICU admissions expected", lines=1)
-                    staff_em = gr.Textbox(label="🚨 Emergency Forecast", placeholder="e.g., 50-60 emergency patients", lines=1)
                     staff_ratio = gr.Textbox(label="📊 Staff Ratio (nurse:patient)", value="1:4")
                     staff_btn = gr.Button("📋 Analyze Staff", variant="primary")
-                    gr.Textbox(value=STAFF_SAMPLE, label="Sample Data (copy to CSV)", lines=6, interactive=False)
+                    gr.Textbox(value=STAFF_SAMPLE, label="Sample Data", lines=8, interactive=False)
                 with gr.Column(scale=2):
-                    staff_out = gr.Textbox(label="Staff Analysis", lines=25)
+                    staff_out = gr.Textbox(label="Staff Analysis", lines=28)
             
-            staff_btn.click(
-                fn=staff_agent, 
-                inputs=[staff_file, severity, staff_icu, staff_em, staff_ratio], 
-                outputs=[staff_out]
-            )
+            staff_btn.click(fn=staff_agent, inputs=[staff_file, severity, staff_ratio], outputs=[staff_out])
     
     gr.Markdown("---\n*TinyLlama-1.1B • No Database • Live Output*")
 
