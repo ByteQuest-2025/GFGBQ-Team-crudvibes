@@ -72,10 +72,10 @@ function FileUpload({ onFileSelect, file, onClear }: FileUploadProps) {
     return (
         <div
             className={`relative border-2 border-dashed rounded-xl p-8 transition-all ${isDragging
-                    ? "border-primary bg-primary/5"
-                    : file
-                        ? "border-emerald-500 bg-emerald-500/5"
-                        : "border-muted-foreground/25 hover:border-muted-foreground/50"
+                ? "border-primary bg-primary/5"
+                : file
+                    ? "border-emerald-500 bg-emerald-500/5"
+                    : "border-muted-foreground/25 hover:border-muted-foreground/50"
                 }`}
             onDragEnter={handleDragIn}
             onDragLeave={handleDragOut}
@@ -123,6 +123,9 @@ function FileUpload({ onFileSelect, file, onClear }: FileUploadProps) {
     )
 }
 
+// Custom component import
+import { StreamingOutput } from "@/components/ui/streaming-output"
+
 interface AgentOutputProps {
     output: string
     isLoading: boolean
@@ -159,9 +162,9 @@ function AgentOutput({ output, isLoading, generatedBy }: AgentOutputProps) {
                     <span className="font-medium text-primary">{generatedBy}</span>
                 </div>
             )}
-            <pre className="whitespace-pre-wrap font-mono text-sm bg-muted/50 p-4 rounded-lg overflow-auto max-h-[500px]">
-                {output}
-            </pre>
+            <div className="bg-muted/50 p-6 rounded-lg overflow-auto max-h-[500px] border border-border/50 shadow-inner">
+                <StreamingOutput content={output} speed={10} />
+            </div>
         </div>
     )
 }
